@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.uci.utils.BotService;
+import com.uci.utils.dto.Adapter;
+import com.uci.utils.dto.Result;
 import com.uci.utils.kafka.SimpleProducer;
 import lombok.extern.slf4j.Slf4j;
 import messagerosa.core.model.*;
@@ -60,16 +62,19 @@ public class CampaignConsumer {
         return botService
                 .getBotNodeFromId(campaignID)
                 .doOnError(s -> log.info(s.getMessage()))
-                .map(new Function<JsonNode, XMessage>() {
+                .map(new Function<Result, XMessage>() {
                     @Override
-                    public XMessage apply(JsonNode campaignDetails) {
+                    public XMessage apply(Result campaignDetails) {
                         ObjectMapper mapper = new ObjectMapper();
-                        JsonNode adapter = campaignDetails.findValues("logic").get(0).get(0).get("adapter");
+//                        JsonNode adapter = campaignDetails.findValues("logic").get(0).get(0).get("adapter");
+
+                        Adapter adapterDto = campaignDetails.getLogicIDs().get(0).getAdapter();
 
                         // Create a new campaign xMessage
                         XMessagePayload payload = XMessagePayload.builder().text("").build();
 
-                        String userSegmentName = ((ArrayNode) campaignDetails.get("userSegments")).get(0).get("name").asText();
+//                        String userSegmentName = ((ArrayNode) campaignDetails.get("userSegments")).get(0).get("name").asText();
+                        String userSegmentName = campaignDetails.getUsers().get(0).getName();
                         SenderReceiverInfo to = SenderReceiverInfo.builder()
                                 .userID(userSegmentName)
                                 .build();
@@ -89,9 +94,9 @@ public class CampaignConsumer {
                         XMessage.MessageType messageType = XMessage.MessageType.BROADCAST_TEXT;
 
                         return XMessage.builder()
-                                .app(campaignDetails.get("name").asText())
-                                .channelURI(adapter.get("channel").asText())
-                                .providerURI(adapter.get("provider").asText())
+                                .app(campaignDetails.getName())
+                                .channelURI(adapterDto.getChannel())
+                                .providerURI(adapterDto.getProvider())
                                 .payload(payload)
                                 .conversationStage(new ConversationStage(0, ConversationStage.State.STARTING))
                                 .timestamp(System.currentTimeMillis())

@@ -1,5 +1,6 @@
 package com.uci.orchestrator.Consumer;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -11,6 +12,9 @@ import com.uci.dao.repository.XMessageRepository;
 import com.uci.utils.BotService;
 import com.uci.utils.bot.util.BotUtil;
 import com.uci.utils.cache.service.RedisCacheService;
+import com.uci.utils.dto.LogicID;
+import com.uci.utils.dto.Meta;
+import com.uci.utils.dto.Result;
 import com.uci.utils.encryption.AESWrapper;
 import com.uci.utils.kafka.ReactiveProducer;
 import com.uci.utils.kafka.SimpleProducer;
@@ -71,7 +75,7 @@ public class ReactiveConsumer {
 
     @Value("${odk-transformer}")
     public String odkTransformerTopic;
-    
+
     @Value("${broadcast-transformer}")
     public String broadcastTransformerTopic;
 
@@ -80,7 +84,7 @@ public class ReactiveConsumer {
 
     @Autowired
     public BotService botService;
-    
+
     @Autowired
     private UserService userService;
 
@@ -89,13 +93,13 @@ public class ReactiveConsumer {
 
     @Autowired
     private RedisCacheService redisCacheService;
-    
+
     public AESWrapper encryptor;
 
     private final String DEFAULT_APP_NAME = "Global Bot";
     LocalDateTime yesterday = LocalDateTime.now().minusDays(1L);
 
-    
+
     @KafkaListener(id = "${inboundProcessed}", topics = "${inboundProcessed}", properties = {"spring.json.value.default.type=java.lang.String"})
     public void onMessage(@Payload String stringMessage) {
         try {
@@ -104,69 +108,84 @@ public class ReactiveConsumer {
             XMessage msg = XMessageParser.parse(new ByteArrayInputStream(stringMessage.getBytes()));
             SenderReceiverInfo from = msg.getFrom();
             logTimeTaken(startTime, 1);
-            botService.getBotNodeFromName(msg.getApp()).doOnNext(new Consumer<JsonNode>() {
+            botService.getBotNodeFromName(msg.getApp()).doOnNext(new Consumer<Result>() {
                 @Override
-                public void accept(JsonNode botNode) {
-                    if(botNode != null && !botNode.isEmpty()) {
+                public void accept(Result result) {
+                    if(result != null) {
                         from.setCampaignID(msg.getApp());
                         if(from.getDeviceType() == null) {
                             from.setDeviceType(DeviceType.PHONE);
                         }
                         if(msg.getAdapterId() == null || msg.getAdapterId().isEmpty()) {
-                            msg.setAdapterId(BotUtil.getBotNodeAdapterId(botNode));
+                            msg.setAdapterId(BotUtil.getBotNodeAdapterId(result));
                         }
                         /* Set XMessage Transformers */
-                        XMessage message = setXMessageTransformers(msg, botNode);
+                        XMessage message = setXMessageTransformers(msg, result);
 
-                        String appId = botNode.get("id").asText();
-                        JsonNode firstTransformer = botNode.findValues("transformers").get(0);
+                        String appId = result.getId();
+                        if(result.getLogicIDs() != null && result.getLogicIDs().size() > 0 && result.getLogicIDs().get(0).getTransformers() != null && result.getLogicIDs().get(0).getTransformers().size() > 0){
+                            com.uci.utils.dto.Transformer transformerDto = result.getLogicIDs().get(0).getTransformers().get(0);
+//                            JsonNode firstTransformer = botNode.findValues("transformers").get(0);
 
-                        resolveUser(message, appId)
-                                .doOnNext(new Consumer<XMessage>() {
-                                    @Override
-                                    public void accept(XMessage msg) {
-                                        SenderReceiverInfo from = msg.getFrom();
-                                        // msg.setFrom(from);
-                                        getLastMessageID(msg)
-                                                .doOnNext(lastMessageID -> {
-                                                    logTimeTaken(startTime, 4);
-                                                    msg.setLastMessageID(lastMessageID);
+                            resolveUser(message, appId)
+                                    .doOnNext(new Consumer<XMessage>() {
+                                        @Override
+                                        public void accept(XMessage msg) {
+                                            SenderReceiverInfo from = msg.getFrom();
+                                            // msg.setFrom(from);
+                                            getLastMessageID(msg)
+                                                    .doOnNext(lastMessageID -> {
+                                                        logTimeTaken(startTime, 4);
+                                                        msg.setLastMessageID(lastMessageID);
 
-                                                    /* Switch From & To */
-                                                    switchFromTo(msg);
+                                                        /* Switch From & To */
+                                                        switchFromTo(msg);
 
-                                                    if (msg.getMessageState().equals(XMessage.MessageState.REPLIED) || msg.getMessageState().equals(XMessage.MessageState.OPTED_IN)) {
-                                                        try {
-                                                            log.info("final msg.toXML(): "+msg.toXML().toString());
-                                                            if(firstTransformer.findValue("type") != null && firstTransformer.findValue("type").asText().equals(BotUtil.transformerTypeBroadcast)) {
-                                                                kafkaProducer.send(broadcastTransformerTopic, msg.toXML());
-                                                            }  else if(firstTransformer.findValue("type") != null && firstTransformer.findValue("type").asText().equals("generic")) {
-                                                                kafkaProducer.send(genericTransformerTopic, msg.toXML());
-                                                            } else {
-                                                                kafkaProducer.send(odkTransformerTopic, msg.toXML());
+                                                        if (msg.getMessageState().equals(XMessage.MessageState.REPLIED) || msg.getMessageState().equals(XMessage.MessageState.OPTED_IN)) {
+                                                            try {
+                                                                log.info("final msg.toXML(): " + msg.toXML().toString());
+                                                                if (transformerDto.getMeta() != null) {
+                                                                    Meta meta = transformerDto.getMeta();
+                                                                    if (meta.getType() != null && meta.getType().equalsIgnoreCase(BotUtil.transformerTypeBroadcast)) {
+                                                                        kafkaProducer.send(broadcastTransformerTopic, msg.toXML());
+                                                                    } else if (meta.getType() != null && meta.getType().equalsIgnoreCase(BotUtil.transformerTypeGeneric)) {
+                                                                        kafkaProducer.send(genericTransformerTopic, msg.toXML());
+                                                                    } else {
+                                                                        kafkaProducer.send(odkTransformerTopic, msg.toXML());
+                                                                    }
+
+//                                                                    if (firstTransformer.findValue("type") != null && firstTransformer.findValue("type").asText().equals(BotUtil.transformerTypeBroadcast)) {
+//                                                                        kafkaProducer.send(broadcastTransformerTopic, msg.toXML());
+//                                                                    } else if (firstTransformer.findValue("type") != null && firstTransformer.findValue("type").asText().equals("generic")) {
+//                                                                        kafkaProducer.send(genericTransformerTopic, msg.toXML());
+//                                                                    } else {
+//                                                                        kafkaProducer.send(odkTransformerTopic, msg.toXML());
+//                                                                    }
+                                                                }
+//
+                                                                // reactiveProducer.sendMessages(odkTransformerTopic, msg.toXML());
+                                                            } catch (JAXBException e) {
+                                                                e.printStackTrace();
                                                             }
-                                                            // reactiveProducer.sendMessages(odkTransformerTopic, msg.toXML());
-                                                        } catch (JAXBException e) {
-                                                            e.printStackTrace();
+                                                            logTimeTaken(startTime, 15);
                                                         }
-                                                        logTimeTaken(startTime, 15);
-                                                    }
-                                                })
-                                                .doOnError(new Consumer<Throwable>() {
-                                                    @Override
-                                                    public void accept(Throwable throwable) {
-                                                        log.error("Error in getLastMessageID" + throwable.getMessage());
-                                                    }
-                                                })
-                                                .subscribe();
-                                    }
-                                })
-                                .doOnError(new Consumer<Throwable>() {
-                                    @Override
-                                    public void accept(Throwable throwable) {
-                                        log.error("Error in resolveUser" + throwable.getMessage());
-                                    }
-                                }).subscribe();
+                                                    })
+                                                    .doOnError(new Consumer<Throwable>() {
+                                                        @Override
+                                                        public void accept(Throwable throwable) {
+                                                            log.error("Error in getLastMessageID" + throwable.getMessage());
+                                                        }
+                                                    })
+                                                    .subscribe();
+                                        }
+                                    })
+                                    .doOnError(new Consumer<Throwable>() {
+                                        @Override
+                                        public void accept(Throwable throwable) {
+                                            log.error("Error in resolveUser" + throwable.getMessage());
+                                        }
+                                    }).subscribe();
+                        }
                     } else {
                         log.error("Bot node not found by name: "+msg.getApp());
                     }
@@ -179,79 +198,157 @@ public class ReactiveConsumer {
         }
     }
 
-    /**
-     * Set Transformer in XMessage with transformer required data in meta
-     * @param xMessage
-     * @param botNode
-     * @return XMessage
-     */
-    private XMessage setXMessageTransformers(XMessage xMessage, JsonNode botNode) {
+//    /**
+//     * Set Transformer in XMessage with transformer required data in meta
+//     * @param xMessage
+//     * @param botNode
+//     * @return XMessage
+//     */
+//    private XMessage setXMessageTransformers(XMessage xMessage, JsonNode botNode) {
+//        ArrayList<Transformer> transformers = new ArrayList<Transformer>();
+//
+//        ArrayList transformerList = (ArrayList) botNode.findValues("transformers");
+//        transformerList.forEach(transformerTmp -> {
+//            JsonNode transformerNode = (JsonNode) transformerTmp;
+//            int i = 0;
+//            while (transformerNode.get(i) != null && transformerNode.get(i).path("meta") != null) {
+//                JsonNode transformer = transformerNode.get(i);
+//                JsonNode transformerMeta = transformer.path("meta") != null
+//                        ? transformer.path("meta") : null;
+//                log.info("transformer:" + transformer);
+//
+//                HashMap<String, String> metaData = new HashMap<String, String>();
+//                /* Bot Data */
+//                metaData.put("startingMessage", BotUtil.getBotNodeData(botNode, "startingMessage"));
+//                metaData.put("botId", BotUtil.getBotNodeData(botNode, "id"));
+//                metaData.put("botOwnerID", BotUtil.getBotNodeData(botNode, "ownerID"));
+//                metaData.put("botOwnerOrgID", BotUtil.getBotNodeData(botNode, "ownerOrgID"));
+//
+//                /* Transformer Data */
+//                metaData.put("id", transformer.get("id").asText());
+//                metaData.put("type", transformerMeta.get("type") != null
+//                        && !transformerMeta.get("type").asText().isEmpty()
+//                        ? transformerMeta.get("type").asText()
+//                        : "");
+//                metaData.put("formID", transformerMeta.findValue("formID") != null
+//                        && !transformerMeta.findValue("formID").asText().isEmpty()
+//                        ? transformerMeta.findValue("formID").asText()
+//                        : "");
+//                if (transformerMeta.get("type") != null && transformerMeta.get("type").asText().equals(BotUtil.transformerTypeBroadcast)) {
+//                    metaData.put("federatedUsers", getFederatedUsersMeta(botNode, transformer));
+//                }
+//
+//                if (transformerMeta.findValue("hiddenFields") != null && !transformerMeta.findValue("hiddenFields").isEmpty()) {
+//                    metaData.put("hiddenFields", transformerMeta.findValue("hiddenFields").toString());
+//                }
+//
+//                if (transformer.findValue("serviceClass") != null && !transformer.findValue("serviceClass").asText().isEmpty()) {
+//                    String serviceClass = transformer.findValue("serviceClass").toString();
+//                    if (serviceClass != null && !serviceClass.isEmpty() && serviceClass.contains("\"")) {
+//                        serviceClass = serviceClass.replaceAll("\"", "");
+//                    }
+//                    metaData.put("serviceClass", serviceClass);
+//                }
+//
+//                if (transformerMeta.get("templateId") != null && !transformerMeta.get("templateId").asText().isEmpty()) {
+//                    metaData.put("templateId", transformerMeta.get("templateId").asText());
+//                }
+//
+//                if (transformerMeta.get("title") != null && !transformerMeta.get("title").asText().isEmpty()) {
+//                    metaData.put("title", transformerMeta.get("title").asText());
+//                }
+//
+//                if (transformer.get("type") != null && transformer.get("type").asText().equals(BotUtil.transformerTypeGeneric)) {
+//                    metaData.put("url", transformer.findValue("url").asText());
+//                }
+//
+//                Transformer transf = new Transformer();
+//                transf.setId(transformer.get("id").asText());
+//                transf.setMetaData(metaData);
+//
+//                transformers.add(transf);
+//                i++;
+//            }
+//        });
+//        xMessage.setTransformers(transformers);
+//        return xMessage;
+//    }
+
+
+    private XMessage setXMessageTransformers(XMessage xMessage, Result result) {
         ArrayList<Transformer> transformers = new ArrayList<Transformer>();
+        ObjectMapper mapper = new ObjectMapper();
+        if (result.getLogicIDs() != null && result.getLogicIDs().size() > 0) {
+            for (LogicID logicID : result.getLogicIDs()) {
+                if (logicID.getTransformers() != null && logicID.getTransformers().size() > 0) {
 
-        ArrayList transformerList = (ArrayList) botNode.findValues("transformers");
-        transformerList.forEach(transformerTmp -> {
-            JsonNode transformerNode = (JsonNode) transformerTmp;
-            int i = 0;
-            while (transformerNode.get(i) != null && transformerNode.get(i).path("meta") != null) {
-                JsonNode transformer = transformerNode.get(i);
-                JsonNode transformerMeta = transformer.path("meta") != null
-                        ? transformer.path("meta") : null;
-                log.info("transformer:" + transformer);
+                    ArrayList transformerList = logicID.getTransformers();
+                    transformerList.forEach(transformerTmp -> {
+                        com.uci.utils.dto.Transformer transformerNode = (com.uci.utils.dto.Transformer) transformerTmp;
+                        if (transformerNode != null && transformerNode.getMeta() != null) {
+                            com.uci.utils.dto.Transformer transformer = transformerNode;
+                            Meta transformerMeta = transformerNode.getMeta();
+                            log.info("transformer:" + transformerNode);
 
-                HashMap<String, String> metaData = new HashMap<String, String>();
-                /* Bot Data */
-                metaData.put("startingMessage", BotUtil.getBotNodeData(botNode, "startingMessage"));
-                metaData.put("botId", BotUtil.getBotNodeData(botNode, "id"));
-                metaData.put("botOwnerID", BotUtil.getBotNodeData(botNode, "ownerID"));
-                metaData.put("botOwnerOrgID", BotUtil.getBotNodeData(botNode, "ownerOrgID"));
+                            HashMap<String, String> metaData = new HashMap<String, String>();
+                            /* Bot Data */
+                            metaData.put("startingMessage", result.getStartingMessage() == null ? null : result.getStartingMessage());
+                            metaData.put("botId", result.getId() == null ? null : result.getId());
+                            metaData.put("botOwnerID", result.getOwnerID() == null ? null : result.getOwnerID());
+                            metaData.put("botOwnerOrgID", result.getOwnerOrgID() == null ? null : result.getOwnerOrgID());
 
-                /* Transformer Data */
-                metaData.put("id", transformer.get("id").asText());
-                metaData.put("type", transformerMeta.get("type") != null
-                        && !transformerMeta.get("type").asText().isEmpty()
-                        ? transformerMeta.get("type").asText()
-                        : "");
-                metaData.put("formID", transformerMeta.findValue("formID") != null
-                        && !transformerMeta.findValue("formID").asText().isEmpty()
-                        ? transformerMeta.findValue("formID").asText()
-                        : "");
-                if (transformerMeta.get("type") != null && transformerMeta.get("type").asText().equals(BotUtil.transformerTypeBroadcast)) {
-                    metaData.put("federatedUsers", getFederatedUsersMeta(botNode, transformer));
+                            /* Transformer Data */
+                            metaData.put("id", transformerNode.getId());
+                            metaData.put("type", (transformerMeta.getType() != null && !transformerMeta.getType().isEmpty())? transformerMeta.getType() : "");
+                            metaData.put("formID", transformerMeta.getFormID() != null && !transformerMeta.getFormID().isEmpty() ? transformerMeta.getFormID() : "");
+                            if (transformerMeta.getType() != null && transformerMeta.getType().equalsIgnoreCase(BotUtil.transformerTypeBroadcast)) {
+                                metaData.put("federatedUsers", getFederatedUsersMeta(result, transformer));
+                            }
+
+                            if (transformerMeta.getHiddenFields() != null && transformerMeta.getHiddenFields().size() > 0) {
+                                try {
+                                    metaData.put("hiddenFields", mapper.writeValueAsString(transformerMeta.getHiddenFields().get(0)));
+                                } catch (JsonProcessingException e) {
+                                    e.printStackTrace();
+                                }
+                            }
+
+                            if (transformerMeta.getServiceClass() != null && !transformerMeta.getServiceClass().isEmpty()) {
+                                String serviceClass = transformerMeta.getServiceClass();
+                                if (serviceClass != null && !serviceClass.isEmpty() && serviceClass.contains("\"")) {
+                                    serviceClass = serviceClass.replaceAll("\"", "");
+                                }
+                                metaData.put("serviceClass", serviceClass);
+                            }
+
+                            if (transformerMeta.getTemplateId() != null && !transformerMeta.getTemplateId().isEmpty()) {
+                                metaData.put("templateId", transformerMeta.getTemplateId());
+                            }
+
+                            if (transformerMeta.getTitle() != null && !transformerMeta.getTitle().isEmpty()) {
+                                metaData.put("title", transformerMeta.getTitle());
+                            }
+
+                            if (transformerMeta.getType() != null && transformerMeta.getType().equalsIgnoreCase(BotUtil.transformerTypeGeneric)) {
+                                log.info("Verify result data for url : "+result);
+                                metaData.put("url", result.getUsers().get(0).getAll().getConfig().getUrl());
+                            }
+
+                            Transformer transf = new Transformer();
+                            transf.setId(transformer.getId());
+                            transf.setMetaData(metaData);
+
+                            transformers.add(transf);
+                        }
+                    });
+                    xMessage.setTransformers(transformers);
+                } else {
+                    log.error("Transformers not found : " + logicID);
                 }
-
-                if (transformerMeta.findValue("hiddenFields") != null && !transformerMeta.findValue("hiddenFields").isEmpty()) {
-                    metaData.put("hiddenFields", transformerMeta.findValue("hiddenFields").toString());
-                }
-
-                if (transformer.findValue("serviceClass") != null && !transformer.findValue("serviceClass").asText().isEmpty()) {
-                    String serviceClass = transformer.findValue("serviceClass").toString();
-                    if (serviceClass != null && !serviceClass.isEmpty() && serviceClass.contains("\"")) {
-                        serviceClass = serviceClass.replaceAll("\"", "");
-                    }
-                    metaData.put("serviceClass", serviceClass);
-                }
-
-                if (transformerMeta.get("templateId") != null && !transformerMeta.get("templateId").asText().isEmpty()) {
-                    metaData.put("templateId", transformerMeta.get("templateId").asText());
-                }
-
-                if (transformerMeta.get("title") != null && !transformerMeta.get("title").asText().isEmpty()) {
-                    metaData.put("title", transformerMeta.get("title").asText());
-                }
-
-                if (transformer.get("type") != null && transformer.get("type").asText().equals(BotUtil.transformerTypeGeneric)) {
-                    metaData.put("url", transformer.findValue("url").asText());
-                }
-
-                Transformer transf = new Transformer();
-                transf.setId(transformer.get("id").asText());
-                transf.setMetaData(metaData);
-
-                transformers.add(transf);
-                i++;
             }
-        });
-        xMessage.setTransformers(transformers);
+        } else {
+            log.error("Conversation logic not found : " + result);
+        }
         return xMessage;
     }
 
@@ -262,9 +359,9 @@ public class ReactiveConsumer {
      * @return Federated users as json string
      */
     private String getFederatedUsersMeta(JsonNode botNode, JsonNode transformer) {
-    	String botId = botNode.get("id").asText();
-    	
-    	/* Get federated users from federation services */
+        String botId = botNode.get("id").asText();
+
+        /* Get federated users from federation services */
         JSONArray users = userService.getUsersFromFederatedServers(botId);
 
         /* Check if users, & related meta data exists in transformer */
@@ -278,10 +375,10 @@ public class ReactiveConsumer {
             ObjectNode node = mapper.createObjectNode();
             node.put("body", transformerMeta.get("body").asText());
             node.put("type", transformerMeta.get("templateType").asText());
-        	
-        	ArrayNode sampleData = mapper.createArrayNode();
-        	for (int i = 0; i < users.length(); i++) {
-            	ObjectNode userData = mapper.createObjectNode();
+
+            ArrayNode sampleData = mapper.createArrayNode();
+            for (int i = 0; i < users.length(); i++) {
+                ObjectNode userData = mapper.createObjectNode();
                 if(transformerMeta.get("params") != null && !transformerMeta.get("params").toString().isEmpty()){
                     JSONArray paramArr = new JSONArray(transformerMeta.get("params").toString());
                     for(int k=0; k<paramArr.length(); k++){
@@ -290,27 +387,27 @@ public class ReactiveConsumer {
                         }
                     }
                 }
-            	userData.put("__index", i);
-            	sampleData.add(userData);
-        	}
-        	node.put("sampleData", sampleData);
-        	
-        	/* Fetch user messages by template from template service */
-        	ArrayList<JSONObject> usersMessage = userService.getUsersMessageByTemplate(node);
-            
-        	log.info("usersMessage: "+usersMessage);
-        	
-        	/* Set User messages against the user phone */
-        	ObjectNode federatedUsersMeta = mapper.createObjectNode();
-        	ArrayNode userMetaData = mapper.createArrayNode();
-            usersMessage.forEach(userMsg -> {
-        		int j = Integer.parseInt(userMsg.get("__index").toString());
-                JSONObject userObj = ((JSONObject) users.get(j));
-        		String userPhone = userObj.getString("phoneNo");
+                userData.put("__index", i);
+                sampleData.add(userData);
+            }
+            node.put("sampleData", sampleData);
 
-        		ObjectNode map = mapper.createObjectNode();
-        		map.put("phone", userPhone);
-        		map.put("message", userMsg.get("body").toString());
+            /* Fetch user messages by template from template service */
+            ArrayList<JSONObject> usersMessage = userService.getUsersMessageByTemplate(node);
+
+            log.info("usersMessage: "+usersMessage);
+
+            /* Set User messages against the user phone */
+            ObjectNode federatedUsersMeta = mapper.createObjectNode();
+            ArrayNode userMetaData = mapper.createArrayNode();
+            usersMessage.forEach(userMsg -> {
+                int j = Integer.parseInt(userMsg.get("__index").toString());
+                JSONObject userObj = ((JSONObject) users.get(j));
+                String userPhone = userObj.getString("phoneNo");
+
+                ObjectNode map = mapper.createObjectNode();
+                map.put("phone", userPhone);
+                map.put("message", userMsg.get("body").toString());
                 try{
                     /* FCM Token */
                     if(userObj.get("fcmToken") != null) {
@@ -324,16 +421,97 @@ public class ReactiveConsumer {
                         map.put("data", transformerMeta.get("data"));
                     }
                 } catch (Exception e) {
-                    //
+                    e.printStackTrace();
                 }
 
                 userMetaData.add(map);
-        		log.info("index: "+j+", body: "+userMsg.get("body").toString()+", phone:"+userPhone);
-        	});
-            
+                log.info("index: "+j+", body: "+userMsg.get("body").toString()+", phone:"+userPhone);
+            });
+
             federatedUsersMeta.put("list", userMetaData);
 
             return federatedUsersMeta.toString();
+        }
+        return "";
+    }
+
+
+    private String getFederatedUsersMeta(Result result, com.uci.utils.dto.Transformer transformer) {
+        String botId = result.getId();
+
+        /* Get federated users from federation services */
+        JSONArray users = userService.getUsersFromFederatedServers(botId);
+
+        /* Check if users, & related meta data exists in transformer */
+        if(users != null && transformer.getMeta() != null
+                && transformer.getMeta().getTemplateType() != null
+                && transformer.getMeta().getBody() != null) {
+            Meta transformerMeta = transformer.getMeta();
+//            ObjectNode transformerMeta = (ObjectNode) transformer.get("meta");
+
+            /* Create request body data for user template message */
+            ObjectMapper mapper = new ObjectMapper();
+            ObjectNode node = mapper.createObjectNode();
+            node.put("body", transformerMeta.getBody());
+            node.put("type", transformerMeta.getTemplateType());
+
+            ArrayNode sampleData = mapper.createArrayNode();
+            for (int i = 0; i < users.length(); i++) {
+                ObjectNode userData = mapper.createObjectNode();
+                if(transformerMeta.getParams() != null && !transformerMeta.getParams().isEmpty()){
+                    JSONArray paramArr = new JSONArray(transformerMeta.getParams().toString());
+                    for(int k=0; k<paramArr.length(); k++){
+                        if(!((JSONObject) users.get(i)).isNull(paramArr.getString(k))){
+                            userData.put(paramArr.getString(k), ((JSONObject) users.get(i)).getString(paramArr.getString(k)));
+                        }
+                    }
+                }
+                userData.put("__index", i);
+                sampleData.add(userData);
+            }
+            node.put("sampleData", sampleData);
+
+            /* Fetch user messages by template from template service */
+            ArrayList<JSONObject> usersMessage = userService.getUsersMessageByTemplate(node);
+
+            log.info("usersMessage: "+usersMessage);
+
+            /* Set User messages against the user phone */
+            ObjectNode federatedUsersMeta = mapper.createObjectNode();
+            ArrayNode userMetaData = mapper.createArrayNode();
+            usersMessage.forEach(userMsg -> {
+                int j = Integer.parseInt(userMsg.get("__index").toString());
+                JSONObject userObj = ((JSONObject) users.get(j));
+                String userPhone = userObj.getString("phoneNo");
+
+                ObjectNode map = mapper.createObjectNode();
+                map.put("phone", userPhone);
+                map.put("message", userMsg.get("body").toString());
+                try{
+                    /* FCM Token */
+                    if(userObj.get("fcmToken") != null) {
+                        map.put("fcmToken", userObj.getString("fcmToken"));
+                    }
+                    /* FCM - If clickActionUrl found in userObj, use it, override previous one */
+                    if(userObj.get("fcmClickActionUrl") != null) {
+                        map.put("fcmClickActionUrl", userObj.getString("fcmClickActionUrl"));
+                    }
+                    if(transformerMeta.getData() != null){
+                        map.put("data", transformerMeta.getData().toString());
+                    }
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+
+                userMetaData.add(map);
+                log.info("index: "+j+", body: "+userMsg.get("body").toString()+", phone:"+userPhone);
+            });
+
+            federatedUsersMeta.put("list", userMetaData);
+
+            return federatedUsersMeta.toString();
+        } else{
+            log.error("getFederatedUsersMeta null found");
         }
         return "";
     }
@@ -349,17 +527,17 @@ public class ReactiveConsumer {
             SenderReceiverInfo from = xmsg.getFrom();
             String appName = xmsg.getApp();
             Boolean found = false;
-            
+
             UUID appID = UUID.fromString(appId);
-            
+
             String deviceString = from.getDeviceType().toString() + ":" + from.getUserID();
             String encodedBase64Key = encodeKey(secret);
             String deviceID = AESWrapper.encrypt(deviceString, encodedBase64Key);
             log.info("deviceString: "+deviceString+", encyprted deviceString: "+deviceID);
             String userID = getFAUserIdForApp(deviceID, appID);
-            
+
             if (userID != null && !userID.isEmpty()) {
-            	log.info("Found FA user id");
+                log.info("Found FA user id");
                 from.setDeviceID(userID);
                 from.setEncryptedDeviceID(deviceID);
                 xmsg.setFrom(from);
@@ -369,14 +547,14 @@ public class ReactiveConsumer {
                         .flatMap(new Function<Pair<Boolean, String>, Mono<XMessage>>() {
                             @Override
                             public Mono<XMessage> apply(Pair<Boolean, String> result) {
-                            	log.info("FA update user");
+                                log.info("FA update user");
                                 if (result.getLeft()) {
                                     from.setDeviceID(result.getRight());
                                     from.setEncryptedDeviceID(deviceID);
                                     xmsg.setFrom(from);
                                     ClientResponse<UserResponse, Errors> response = botService.fusionAuthClient.retrieveUserByUsername(deviceID);
                                     if (response.wasSuccessful() && isUserRegistered(response, appID)) {
-                                    	redisCacheService.setFAUserIDForAppCache(getFACacheName(deviceID, appID), response.successResponse.user.id.toString());
+                                        redisCacheService.setFAUserIDForAppCache(getFACacheName(deviceID, appID), response.successResponse.user.id.toString());
                                         return Mono.just(xmsg);
                                     } else {
                                         return Mono.just(xmsg);
@@ -400,7 +578,7 @@ public class ReactiveConsumer {
             return Mono.just(xmsg);
         }
     }
-    
+
     /**
      * Get Fusion Auth User's UUID for App
      * @param deviceID
@@ -408,22 +586,22 @@ public class ReactiveConsumer {
      * @return
      */
     private String getFAUserIdForApp(String deviceID, UUID appID) {
-    	String userID = null;
-    
-    	Object result = redisCacheService.getFAUserIDForAppCache(getFACacheName(deviceID, appID));
-    	userID = result != null ? result.toString() : null;
-    	
-    	if(userID == null || userID.isEmpty()) {
-    		ClientResponse<UserResponse, Errors> response = botService.fusionAuthClient.retrieveUserByUsername(deviceID);
-            
+        String userID = null;
+
+        Object result = redisCacheService.getFAUserIDForAppCache(getFACacheName(deviceID, appID));
+        userID = result != null ? result.toString() : null;
+
+        if(userID == null || userID.isEmpty()) {
+            ClientResponse<UserResponse, Errors> response = botService.fusionAuthClient.retrieveUserByUsername(deviceID);
+
             if (response.wasSuccessful() && isUserRegistered(response, appID)) {
-            	userID = response.successResponse.user.id.toString();
-            	redisCacheService.setFAUserIDForAppCache(getFACacheName(deviceID, appID), userID);
+                userID = response.successResponse.user.id.toString();
+                redisCacheService.setFAUserIDForAppCache(getFACacheName(deviceID, appID), userID);
             }
-    	}
+        }
         return userID;
     }
-    
+
     /**
      * Check if FA user is registered for appid
      * @param response
@@ -431,17 +609,17 @@ public class ReactiveConsumer {
      * @return
      */
     private Boolean isUserRegistered(ClientResponse<UserResponse, Errors> response, UUID appID) {
-    	List<UserRegistration> registrations = response.successResponse.user.getRegistrations();
-    	for(int i=0; i<registrations.size(); i++) {
-    		if(registrations.get(i).applicationId.equals(appID)) {
-    			return true;
-    		}
-    	}
-    	return false;
+        List<UserRegistration> registrations = response.successResponse.user.getRegistrations();
+        for(int i=0; i<registrations.size(); i++) {
+            if(registrations.get(i).applicationId.equals(appID)) {
+                return true;
+            }
+        }
+        return false;
     }
-    
+
     private String getFACacheName(String deviceID, UUID appID) {
-    	return deviceID+"-"+appID.toString();
+        return deviceID+"-"+appID.toString();
     }
 
     /**
@@ -451,7 +629,7 @@ public class ReactiveConsumer {
     private void updateFAUser(User user) {
         System.out.println(user);
         UserRequest r = new UserRequest(user);
-        
+
         ClientResponse<UserResponse, Errors> response = botService.fusionAuthClient.updateUser(user.id, r);
         if(response.wasSuccessful()) {
             System.out.println("user update success");
@@ -477,7 +655,7 @@ public class ReactiveConsumer {
      * @return
      */
     private Mono<String> getLastMessageID(XMessage msg) {
-        if (msg != null && msg.getMessageType().toString().equalsIgnoreCase("text")) {
+        if (msg != null && msg.getFrom() != null && msg.getFrom().getUserID() != null && msg.getMessageType().toString().equalsIgnoreCase("text")) {
             return getLatestXMessage(msg.getFrom().getUserID(), yesterday, "SENT").map(new Function<XMessageDAO, String>() {
                 @Override
                 public String apply(XMessageDAO msg1) {
@@ -489,13 +667,15 @@ public class ReactiveConsumer {
                 }
             });
 
-        } else if (msg != null && msg.getMessageType().toString().equalsIgnoreCase("button")) {
+        } else if (msg != null && msg.getFrom() != null && msg.getFrom().getUserID() != null && msg.getMessageType().toString().equalsIgnoreCase("button")) {
             return getLatestXMessage(msg.getFrom().getUserID(), yesterday, "SENT").map(new Function<XMessageDAO, String>() {
                 @Override
                 public String apply(XMessageDAO lastMessage) {
                     return String.valueOf(lastMessage.getId());
                 }
             });
+        } else{
+            log.error("getLastMessageID not found : "+msg.getFrom());
         }
         return Mono.empty();
     }
