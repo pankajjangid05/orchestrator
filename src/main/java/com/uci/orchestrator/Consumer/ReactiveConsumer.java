@@ -198,83 +198,12 @@ public class ReactiveConsumer {
         }
     }
 
-//    /**
-//     * Set Transformer in XMessage with transformer required data in meta
-//     * @param xMessage
-//     * @param botNode
-//     * @return XMessage
-//     */
-//    private XMessage setXMessageTransformers(XMessage xMessage, JsonNode botNode) {
-//        ArrayList<Transformer> transformers = new ArrayList<Transformer>();
-//
-//        ArrayList transformerList = (ArrayList) botNode.findValues("transformers");
-//        transformerList.forEach(transformerTmp -> {
-//            JsonNode transformerNode = (JsonNode) transformerTmp;
-//            int i = 0;
-//            while (transformerNode.get(i) != null && transformerNode.get(i).path("meta") != null) {
-//                JsonNode transformer = transformerNode.get(i);
-//                JsonNode transformerMeta = transformer.path("meta") != null
-//                        ? transformer.path("meta") : null;
-//                log.info("transformer:" + transformer);
-//
-//                HashMap<String, String> metaData = new HashMap<String, String>();
-//                /* Bot Data */
-//                metaData.put("startingMessage", BotUtil.getBotNodeData(botNode, "startingMessage"));
-//                metaData.put("botId", BotUtil.getBotNodeData(botNode, "id"));
-//                metaData.put("botOwnerID", BotUtil.getBotNodeData(botNode, "ownerID"));
-//                metaData.put("botOwnerOrgID", BotUtil.getBotNodeData(botNode, "ownerOrgID"));
-//
-//                /* Transformer Data */
-//                metaData.put("id", transformer.get("id").asText());
-//                metaData.put("type", transformerMeta.get("type") != null
-//                        && !transformerMeta.get("type").asText().isEmpty()
-//                        ? transformerMeta.get("type").asText()
-//                        : "");
-//                metaData.put("formID", transformerMeta.findValue("formID") != null
-//                        && !transformerMeta.findValue("formID").asText().isEmpty()
-//                        ? transformerMeta.findValue("formID").asText()
-//                        : "");
-//                if (transformerMeta.get("type") != null && transformerMeta.get("type").asText().equals(BotUtil.transformerTypeBroadcast)) {
-//                    metaData.put("federatedUsers", getFederatedUsersMeta(botNode, transformer));
-//                }
-//
-//                if (transformerMeta.findValue("hiddenFields") != null && !transformerMeta.findValue("hiddenFields").isEmpty()) {
-//                    metaData.put("hiddenFields", transformerMeta.findValue("hiddenFields").toString());
-//                }
-//
-//                if (transformer.findValue("serviceClass") != null && !transformer.findValue("serviceClass").asText().isEmpty()) {
-//                    String serviceClass = transformer.findValue("serviceClass").toString();
-//                    if (serviceClass != null && !serviceClass.isEmpty() && serviceClass.contains("\"")) {
-//                        serviceClass = serviceClass.replaceAll("\"", "");
-//                    }
-//                    metaData.put("serviceClass", serviceClass);
-//                }
-//
-//                if (transformerMeta.get("templateId") != null && !transformerMeta.get("templateId").asText().isEmpty()) {
-//                    metaData.put("templateId", transformerMeta.get("templateId").asText());
-//                }
-//
-//                if (transformerMeta.get("title") != null && !transformerMeta.get("title").asText().isEmpty()) {
-//                    metaData.put("title", transformerMeta.get("title").asText());
-//                }
-//
-//                if (transformer.get("type") != null && transformer.get("type").asText().equals(BotUtil.transformerTypeGeneric)) {
-//                    metaData.put("url", transformer.findValue("url").asText());
-//                }
-//
-//                Transformer transf = new Transformer();
-//                transf.setId(transformer.get("id").asText());
-//                transf.setMetaData(metaData);
-//
-//                transformers.add(transf);
-//                i++;
-//            }
-//        });
-//        xMessage.setTransformers(transformers);
-//        return xMessage;
-//    }
-
-
+    /**
+     * Set Transformer in XMessage with transformer required data in meta
+     * @param xMessage
+     * @param result
+     * @return XMessage
+     */
     private XMessage setXMessageTransformers(XMessage xMessage, Result result) {
         ArrayList<Transformer> transformers = new ArrayList<Transformer>();
         ObjectMapper mapper = new ObjectMapper();
@@ -354,88 +283,10 @@ public class ReactiveConsumer {
 
     /**
      * Get Federated Users Data for Broadcast transformer
-     * @param botNode
+     * @param result
      * @param transformer
      * @return Federated users as json string
      */
-    private String getFederatedUsersMeta(JsonNode botNode, JsonNode transformer) {
-        String botId = botNode.get("id").asText();
-
-        /* Get federated users from federation services */
-        JSONArray users = userService.getUsersFromFederatedServers(botId);
-
-        /* Check if users, & related meta data exists in transformer */
-        if(users != null && transformer.get("meta") != null
-                && transformer.get("meta").get("templateType") != null
-                && transformer.get("meta").get("body") != null) {
-            ObjectNode transformerMeta = (ObjectNode) transformer.get("meta");
-
-            /* Create request body data for user template message */
-            ObjectMapper mapper = new ObjectMapper();
-            ObjectNode node = mapper.createObjectNode();
-            node.put("body", transformerMeta.get("body").asText());
-            node.put("type", transformerMeta.get("templateType").asText());
-
-            ArrayNode sampleData = mapper.createArrayNode();
-            for (int i = 0; i < users.length(); i++) {
-                ObjectNode userData = mapper.createObjectNode();
-                if(transformerMeta.get("params") != null && !transformerMeta.get("params").toString().isEmpty()){
-                    JSONArray paramArr = new JSONArray(transformerMeta.get("params").toString());
-                    for(int k=0; k<paramArr.length(); k++){
-                        if(!((JSONObject) users.get(i)).isNull(paramArr.getString(k))){
-                            userData.put(paramArr.getString(k), ((JSONObject) users.get(i)).getString(paramArr.getString(k)));
-                        }
-                    }
-                }
-                userData.put("__index", i);
-                sampleData.add(userData);
-            }
-            node.put("sampleData", sampleData);
-
-            /* Fetch user messages by template from template service */
-            ArrayList<JSONObject> usersMessage = userService.getUsersMessageByTemplate(node);
-
-            log.info("usersMessage: "+usersMessage);
-
-            /* Set User messages against the user phone */
-            ObjectNode federatedUsersMeta = mapper.createObjectNode();
-            ArrayNode userMetaData = mapper.createArrayNode();
-            usersMessage.forEach(userMsg -> {
-                int j = Integer.parseInt(userMsg.get("__index").toString());
-                JSONObject userObj = ((JSONObject) users.get(j));
-                String userPhone = userObj.getString("phoneNo");
-
-                ObjectNode map = mapper.createObjectNode();
-                map.put("phone", userPhone);
-                map.put("message", userMsg.get("body").toString());
-                try{
-                    /* FCM Token */
-                    if(userObj.get("fcmToken") != null) {
-                        map.put("fcmToken", userObj.getString("fcmToken"));
-                    }
-                    /* FCM - If clickActionUrl found in userObj, use it, override previous one */
-                    if(userObj.get("fcmClickActionUrl") != null) {
-                        map.put("fcmClickActionUrl", userObj.getString("fcmClickActionUrl"));
-                    }
-                    if(transformerMeta.get("data") != null){
-                        map.put("data", transformerMeta.get("data"));
-                    }
-                } catch (Exception e) {
-                    e.printStackTrace();
-                }
-
-                userMetaData.add(map);
-                log.info("index: "+j+", body: "+userMsg.get("body").toString()+", phone:"+userPhone);
-            });
-
-            federatedUsersMeta.put("list", userMetaData);
-
-            return federatedUsersMeta.toString();
-        }
-        return "";
-    }
-
-
     private String getFederatedUsersMeta(Result result, com.uci.utils.dto.Transformer transformer) {
         String botId = result.getId();
 
