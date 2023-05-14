@@ -360,8 +360,11 @@ public class ReactiveConsumer {
                     if(transformerMeta.get("data") != null){
                         map.put("data", transformerMeta.get("data"));
                     }
+                    if(transformerMeta.get("notification") != null){
+                        map.put("notification", transformerMeta.get("notification"));
+                    }
                 } catch (Exception e) {
-                    //
+                    log.error("An Error Occored : " + e.getMessage());
                 }
 
                 userMetaData.add(map);
